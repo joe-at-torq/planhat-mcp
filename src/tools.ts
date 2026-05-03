@@ -181,7 +181,7 @@ registerCRUD({
   label: "company (customer account)",
   createRequired: ["name"],
   listExtraParams: {
-    status: { type: "string", description: "Filter by status" },
+    status: { type: "string", description: "Filter by status. Use find_company_by_name when searching by name — it is much more efficient." },
   },
   createProperties: {
     name: { type: "string", description: "Company name (required for creation)" },
@@ -210,7 +210,7 @@ add(
   {
     name: "list_lean_companies",
     description:
-      "Get a lightweight list of companies with only _id, name, externalId, and sourceId. Auto-paginates to return all matches. Pass 'limit' to cap results.",
+      "Get a lightweight list of companies with only _id, name, externalId, and sourceId. Intended for ID lookups and bulk mapping — not for name searches. Use find_company_by_name to search by name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -221,6 +221,69 @@ add(
     },
   },
   (client, args) => client.list("leancompanies", args)
+);
+
+add(
+  {
+    name: "find_company_by_name",
+    description:
+      "Search for companies by name. Fetches the lean company list (only _id, name, externalId, sourceId) to find matches efficiently, then retrieves full details only for the current page of results. Always prefer this over list_companies when looking up a company by name. Use 'page' and 'page_size' to paginate through large result sets without flooding context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Company name to search for (case-insensitive substring match by default)",
+        },
+        exact: {
+          type: "boolean",
+          description: "Require an exact case-insensitive match instead of substring (default: false)",
+        },
+        page: {
+          type: "number",
+          description: "Page number to return (1-based, default: 1)",
+        },
+        page_size: {
+          type: "number",
+          description: "Number of full company records to return per page (default: 5, max: 20)",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  async (client, args) => {
+    const searchName = (args.name as string).toLowerCase();
+    const exact = args.exact === true;
+    const pageSize = Math.min(typeof args.page_size === "number" ? args.page_size : 5, 20);
+    const page = typeof args.page === "number" ? Math.max(1, args.page) : 1;
+
+    // Step 1: fetch all lean companies (auto-paginated, minimal payload)
+    const lean = (await client.list("leancompanies", {})) as Array<{
+      _id: string;
+      name?: string;
+    }>;
+
+    // Step 2: filter by name client-side
+    const allMatches = lean.filter((c) => {
+      const n = (c.name ?? "").toLowerCase();
+      return exact ? n === searchName : n.includes(searchName);
+    });
+
+    const totalMatches = allMatches.length;
+    const totalPages = Math.ceil(totalMatches / pageSize) || 1;
+    const pageMatches = allMatches.slice((page - 1) * pageSize, page * pageSize);
+
+    if (pageMatches.length === 0) {
+      return { total_matches: totalMatches, page, total_pages: totalPages, results: [] };
+    }
+
+    // Step 3: fetch full details only for this page of matches
+    const results = await Promise.all(
+      pageMatches.map((c) => client.getById("companies", c._id))
+    );
+
+    return { total_matches: totalMatches, page, total_pages: totalPages, results };
+  }
 );
 
 registerCRUD({
